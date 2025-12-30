@@ -1,0 +1,2 @@
+# One_Shot_Federated_Learning_for_LEO_Constellations
+One-Shot Federated Learning for LEO Constellations
