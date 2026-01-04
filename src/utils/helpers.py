@@ -143,10 +143,12 @@ def save_models(
     # Save generator model (if applicable)
     if use_synthetic and generator is not None:
         generator_path = os.path.join(experiment_dir, "generator_model.pt")
+        # Get actual generator module (unwrap DataParallel if needed)
+        actual_generator = generator.module if isinstance(generator, torch.nn.DataParallel) else generator
         torch.save({
-            "model_state_dict": generator.state_dict(),
-            "latent_dim": generator.latent_dim,
-            "img_size": generator.img_size,
+            "model_state_dict": actual_generator.state_dict(),
+            "latent_dim": actual_generator.latent_dim,
+            "img_size": actual_generator.img_size,
         }, generator_path)
         print(f"Generator model saved to: {generator_path}")
 

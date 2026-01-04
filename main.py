@@ -65,8 +65,12 @@ def parse_args():
         help="Use synthetic data generation (default: True)"
     )
     parser.add_argument(
-        "--device", type=str, default="cuda:1",
-        help="Device to use for training (default: cuda:1)"
+        "--device", type=str, default="cuda:0",
+        help="Device to use: 'cuda:0', 'cuda:1', 'cuda' (all GPUs), 'mps', 'cpu', or 'auto' (default: cuda:0)"
+    )
+    parser.add_argument(
+        "--multi-gpu", action="store_true",
+        help="Use all available GPUs for training (DataParallel)"
     )
     parser.add_argument(
         "--results-dir", type=str, default="./results",
@@ -83,16 +87,43 @@ def parse_args():
     return parser.parse_args()
 
 #
-# python main.py \
-#   --dataset MNIST \
-#   --fast True \
-#   --synthetic True \
-#   --enable-virtual-retraining \
-#   --device cuda:1
+# Example commands:
+#   python main.py --dataset MNIST --fast True --synthetic True --device cuda:0
+#   python main.py --dataset MNIST --fast True --synthetic True --device cuda:1
+#   python main.py --dataset MNIST --fast True --synthetic True --device cuda --multi-gpu  # Use all GPUs
+#   python main.py --dataset CIFAR10 --fast False --synthetic True --device cuda --multi-gpu
 
 def main():
     """Main entry point for the experiment."""
     args = parse_args()
+    
+    # Handle device selection with CUDA and multi-GPU support
+    use_multi_gpu = args.multi_gpu or args.device == "cuda"
+    gpu_ids = None
+    
+    if use_multi_gpu and torch.cuda.is_available():
+        if torch.cuda.device_count() >= 2:
+            device_str = "cuda"
+            # Use only GPU 0 and 1
+            gpu_ids = [0, 1]
+            print(f"✓ Using Multi-GPU mode with GPUs: {gpu_ids}")
+        else:
+            print(f"⚠️  Only {torch.cuda.device_count()} GPU(s) available. Using single GPU mode.")
+            device_str = "cuda:0"
+            use_multi_gpu = False
+    elif args.device.startswith("cuda"):
+        if torch.cuda.is_available():
+            # Validate CUDA device index
+            device_idx = int(args.device.split(":")[1]) if ":" in args.device else 0
+            if device_idx >= torch.cuda.device_count():
+                print(f"⚠️  CUDA device {device_idx} not available. Using device 0 instead.")
+                device_str = "cuda:0"
+            else:
+                device_str = args.device
+                print(f"✓ Using CUDA device {device_idx}")
+    else:
+        device_str = args.device
+        use_multi_gpu = False
     
     # Create configuration
     config = Config(
@@ -100,14 +131,18 @@ def main():
         fast_mode=args.fast == "True",
         random_seed=args.seed,
         results_dir=args.results_dir,
-        device=args.device if torch.cuda.is_available() else "cpu",
+        device=device_str,
         use_synthetic_data=args.synthetic == "True",
     )
     config.virtual_retraining.enabled = args.enable_virtual_retraining
     
-    # Setup
-    device = torch.device(config.device)
-    print(f"Device: {device}")
+    # Setup device
+    if use_multi_gpu:
+        device = torch.device("cuda:0")  # Primary device for DataParallel
+        print(f"Primary Device: {device} (Multi-GPU mode enabled with GPUs: {gpu_ids})")
+    else:
+        device = torch.device(config.device)
+        print(f"Device: {device}")
     
     set_seed(config.random_seed)
     
@@ -159,7 +194,9 @@ def main():
         batch_size=config.teacher.batch_size,
         early_stopping=config.teacher.early_stopping,
         patience=config.teacher.patience,
-        min_delta=config.teacher.min_delta
+        min_delta=config.teacher.min_delta,
+        use_multi_gpu=use_multi_gpu,
+        gpu_ids=gpu_ids if use_multi_gpu else None
     )
     
     # =========================================================================
@@ -179,6 +216,17 @@ def main():
             ngf=64
         )
         
+        # Wrap generator with DataParallel if multi-GPU is enabled
+        if use_multi_gpu and gpu_ids is not None:
+            generator = torch.nn.DataParallel(generator, device_ids=gpu_ids)
+            print(f"Wrapped generator with DataParallel for GPUs: {gpu_ids}")
+        
+        # Infer n_classes from orbit_labels
+        all_labels = set()
+        for labels in config.orbit_labels:
+            all_labels.update(labels)
+        n_classes = max(all_labels) + 1 if all_labels else 10
+        
         generator = train_generator(
             generator=generator,
             teachers=teachers,
@@ -187,8 +235,14 @@ def main():
             epochs=config.get_generator_epochs(),
             batch_size=config.get_generator_batch_size(),
             lr=config.generator.learning_rate,
-            diversity_weight=config.generator.diversity_weight
+            diversity_weight=config.generator.diversity_weight,
+            n_classes=n_classes,
+            use_multi_gpu=use_multi_gpu
         )
+        
+        # Unwrap DataParallel for saving
+        if isinstance(generator, torch.nn.DataParallel):
+            generator = generator.module
         
         # Create synthetic data loader for KD
         kd_loader = SyntheticDataLoader(
@@ -230,11 +284,17 @@ def main():
     print("Evaluating Teachers and Ensembles")
     print(f"{'='*60}")
     
+    # Infer n_classes from orbit_labels
+    all_labels = set()
+    for labels in config.orbit_labels:
+        all_labels.update(labels)
+    n_classes = max(all_labels) + 1 if all_labels else 10
+    
     teacher_accs = [eval_acc(t, eval_loader, device) 
                    for t in tqdm(teachers, desc="Evaluating teachers")]
     ens_acc = eval_ensemble_acc(teachers, eval_loader, device)
     class_aware_ens_acc = eval_class_aware_ensemble_acc(
-        teachers, eval_loader, config.orbit_labels, device
+        teachers, eval_loader, config.orbit_labels, device, n_classes=n_classes
     )
     
     print(f"\nTeacher accuracies: {[f'{a:.4f}' for a in teacher_accs]}")
@@ -249,6 +309,11 @@ def main():
     print(f"{'='*60}")
     
     student = make_resnet18()
+    
+    # Wrap student with DataParallel if multi-GPU is enabled
+    if use_multi_gpu and gpu_ids is not None:
+        student = torch.nn.DataParallel(student, device_ids=gpu_ids)
+        print(f"Wrapped student with DataParallel for GPUs: {gpu_ids}")
     
     student, final_acc, best_acc, epochs_trained = train_student_kd(
         student=student,
@@ -267,6 +332,10 @@ def main():
         patience=config.kd.patience,
         min_delta=config.kd.min_delta
     )
+    
+    # Unwrap DataParallel for evaluation and saving
+    if isinstance(student, torch.nn.DataParallel):
+        student = student.module
     
     # =========================================================================
     # PHASE 4: Virtual Retraining (Optional)

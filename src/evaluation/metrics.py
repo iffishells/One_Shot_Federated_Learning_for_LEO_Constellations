@@ -82,7 +82,9 @@ def class_aware_ensemble(
     x: torch.Tensor, 
     orbit_labels: List[List[int]],
     device: torch.device,
-    n_classes: int = 10
+    n_classes: int = 10,
+    temperature: float = 1.0,
+    return_logits: bool = False
 ) -> torch.Tensor:
     """
     Class-aware ensemble where each teacher contributes only to classes it was trained on.
@@ -95,28 +97,43 @@ def class_aware_ensemble(
         x: Input tensor of shape (batch_size, C, H, W)
         orbit_labels: List of class labels each teacher was trained on
         device: Device for computation
-        n_classes: Total number of classes
+        n_classes: Total number of classes (inferred from orbit_labels if not provided)
+        temperature: Temperature for softmax scaling (default: 1.0)
+        return_logits: If True, return logits instead of probabilities
     
     Returns:
-        Ensemble probabilities of shape (batch_size, n_classes)
+        Ensemble probabilities (or logits if return_logits=True) of shape (batch_size, n_classes)
     """
     batch_size = x.size(0)
     
-    # Accumulate weighted votes per class
+    # Infer n_classes from orbit_labels if not provided
+    if n_classes is None:
+        all_labels = set()
+        for labels in orbit_labels:
+            all_labels.update(labels)
+        n_classes = max(all_labels) + 1 if all_labels else 10
+    
+    # Accumulate weighted votes per class (using logits for temperature scaling)
     vote_sum = torch.zeros(batch_size, n_classes, device=device)
     vote_count = torch.zeros(n_classes, device=device)
 
     for teacher, labels in zip(teachers, orbit_labels):
         logits = teacher(x)
-        probs = F.softmax(logits, dim=1)
+        # Apply temperature to logits before accumulating
+        logits_scaled = logits / temperature
         for c in labels:
-            vote_sum[:, c] += probs[:, c]
+            vote_sum[:, c] += logits_scaled[:, c]
             vote_count[c] += 1
 
-    # Average votes per class
+    # Average logits per class
     vote_count = vote_count.clamp(min=1)
-    ensemble_probs = vote_sum / vote_count.unsqueeze(0)
+    ensemble_logits = vote_sum / vote_count.unsqueeze(0)
     
+    if return_logits:
+        return ensemble_logits
+    
+    # Convert to probabilities
+    ensemble_probs = F.softmax(ensemble_logits, dim=1)
     return ensemble_probs
 
 
@@ -124,7 +141,8 @@ def eval_class_aware_ensemble_acc(
     teachers: List[nn.Module], 
     loader: DataLoader, 
     orbit_labels: List[List[int]],
-    device: torch.device
+    device: torch.device,
+    n_classes: int = 10
 ) -> float:
     """
     Evaluate class-aware ensemble accuracy.
@@ -134,6 +152,7 @@ def eval_class_aware_ensemble_acc(
         loader: Data loader
         orbit_labels: Class labels each teacher was trained on
         device: Device for computation
+        n_classes: Total number of classes (inferred if not provided)
     
     Returns:
         Class-aware ensemble accuracy
@@ -147,7 +166,7 @@ def eval_class_aware_ensemble_acc(
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
-            ens_probs = class_aware_ensemble(teachers, x, orbit_labels, device)
+            ens_probs = class_aware_ensemble(teachers, x, orbit_labels, device, n_classes=n_classes)
             correct += (ens_probs.argmax(1) == y).sum().item()
             total += x.size(0)
     
@@ -159,7 +178,8 @@ def evaluate_all_models(
     student: nn.Module,
     eval_loader: DataLoader,
     orbit_labels: List[List[int]],
-    device: torch.device
+    device: torch.device,
+    n_classes: int = None
 ) -> dict:
     """
     Evaluate all models and return comprehensive metrics.
@@ -170,10 +190,18 @@ def evaluate_all_models(
         eval_loader: Evaluation data loader
         orbit_labels: Class labels per orbit
         device: Device for computation
+        n_classes: Total number of classes (inferred if not provided)
     
     Returns:
         Dictionary with all evaluation metrics
     """
+    # Infer n_classes from orbit_labels if not provided
+    if n_classes is None:
+        all_labels = set()
+        for labels in orbit_labels:
+            all_labels.update(labels)
+        n_classes = max(all_labels) + 1 if all_labels else 10
+    
     print("Evaluating all models...")
     
     # Evaluate individual teachers
@@ -185,7 +213,7 @@ def evaluate_all_models(
     # Evaluate ensembles
     naive_ens_acc = eval_ensemble_acc(teachers, eval_loader, device)
     class_aware_ens_acc = eval_class_aware_ensemble_acc(
-        teachers, eval_loader, orbit_labels, device
+        teachers, eval_loader, orbit_labels, device, n_classes=n_classes
     )
     
     # Evaluate student

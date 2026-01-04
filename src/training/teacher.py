@@ -151,7 +151,9 @@ def train_all_teachers(
     batch_size: int = 32,
     early_stopping: bool = True,
     patience: int = 10,
-    min_delta: float = 0.001
+    min_delta: float = 0.001,
+    use_multi_gpu: bool = False,
+    gpu_ids: list = None
 ) -> Tuple[list, list]:
     """
     Train all teacher models for each orbit.
@@ -191,6 +193,12 @@ def train_all_teachers(
         )
         
         teacher = teacher_factory()
+        
+        # Wrap with DataParallel if multi-GPU is enabled
+        if use_multi_gpu and gpu_ids is not None:
+            teacher = torch.nn.DataParallel(teacher, device_ids=gpu_ids)
+            print(f"  Wrapped teacher {i} with DataParallel for GPUs: {gpu_ids}")
+        
         teacher, epochs_trained, best_acc = train_teacher(
             teacher, tr, va,
             device=device,
@@ -201,6 +209,10 @@ def train_all_teachers(
             patience=patience,
             min_delta=min_delta
         )
+        
+        # Unwrap DataParallel for evaluation and saving
+        if isinstance(teacher, torch.nn.DataParallel):
+            teacher = teacher.module
         
         teachers.append(teacher)
         teacher_training_info.append({

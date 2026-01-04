@@ -88,7 +88,9 @@ def train_student_kd(
             with torch.no_grad():
                 if use_class_aware:
                     # Class-aware ensemble: each teacher contributes only to its classes
-                    p = class_aware_ensemble(teachers, x, orbit_labels, device)
+                    # Apply temperature scaling for consistent KD training
+                    p = class_aware_ensemble(teachers, x, orbit_labels, device, 
+                                            temperature=temperature, return_logits=False)
                 else:
                     # Naive average
                     logits_list = [m(x) for m in teachers]

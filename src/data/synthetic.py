@@ -32,6 +32,8 @@ class SyntheticDataLoader:
         self.num_batches = num_batches
         self.batch_size = batch_size
         self.device = device
+        # Get actual generator module (unwrap DataParallel if needed)
+        self.actual_generator = generator.module if isinstance(generator, torch.nn.DataParallel) else generator
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -43,7 +45,7 @@ class SyntheticDataLoader:
         self.generator.eval()
         for _ in range(self.num_batches):
             with torch.no_grad():
-                fake_images = self.generator.generate_batch(self.batch_size, self.device)
+                fake_images = self.actual_generator.generate_batch(self.batch_size, self.device)
             # Yield images with dummy labels (not used in KD)
             yield fake_images, torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
 

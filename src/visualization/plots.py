@@ -240,8 +240,10 @@ def plot_real_vs_synthetic(
 
     # Generate synthetic images
     generator.eval()
+    # Get actual generator module (unwrap DataParallel if needed)
+    actual_generator = generator.module if isinstance(generator, torch.nn.DataParallel) else generator
     with torch.no_grad():
-        z = torch.randn(8, generator.latent_dim, device=device)
+        z = torch.randn(8, actual_generator.latent_dim, device=device)
         synth_batch = generator(z)
 
         # Get predictions
@@ -399,7 +401,9 @@ def save_synthetic_images(
     
     generator.eval()
     with torch.no_grad():
-        z = torch.randn(num_images, generator.latent_dim, device=device)
+        # Get actual generator module (unwrap DataParallel if needed)
+        actual_generator = generator.module if isinstance(generator, torch.nn.DataParallel) else generator
+        z = torch.randn(num_images, actual_generator.latent_dim, device=device)
         synthetic_images = generator(z)
 
         # Get teacher predictions

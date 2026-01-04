@@ -69,7 +69,7 @@ class Config:
     fast_mode: bool = False
     random_seed: int = 42
     results_dir: str = "./results"
-    device: str = "cuda:1"
+    device: str = "cuda:0"
     
     # Orbit configuration (non-IID data distribution)
     orbit_labels: List[List[int]] = field(default_factory=lambda: [
